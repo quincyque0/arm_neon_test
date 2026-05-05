@@ -15,8 +15,166 @@
 #include <thread>
 #include <atomic>
 #include <cmath>
+#include <future>
+#include <algorithm>
 
 namespace AppGui {
+
+struct ChartPoint { size_t n; double ms_scalar; double ms_neon; };
+
+static std::atomic<bool>  chart_running{false};
+static std::atomic<float> chart_progress{0.0f};
+static std::vector<ChartPoint> chart_data;
+static std::future<std::vector<ChartPoint>> chart_future;
+static const int chart_repeats = 3;
+
+static std::vector<size_t> BuildChartSizes() {
+    std::vector<size_t> sizes;
+    const double lo = std::log2(1000.0), hi = std::log2(10000000.0);
+    for (int i = 0; i < 80; ++i) {
+        double t = (double)i / 79.0;
+        size_t s = (size_t)std::round(std::pow(2.0, lo + t * (hi - lo)));
+        s = (s + 15) & ~size_t(15);
+        sizes.push_back(s);
+    }
+    return sizes;
+}
+
+static void RunChartAsync() {
+    if (chart_running.load()) return;
+    chart_running.store(true);
+    chart_progress.store(0.0f);
+    chart_data.clear();
+    int repeats = chart_repeats;
+    chart_future = std::async(std::launch::async, [repeats]() {
+        auto sizes = BuildChartSizes();
+        std::vector<ChartPoint> out;
+        out.reserve(sizes.size());
+        int total = (int)sizes.size(), idx = 0;
+        for (size_t n : sizes) {
+            std::vector<float> a(n), b(n);
+            std::mt19937 gen(42);
+            std::uniform_real_distribution<float> dist(-1.f, 1.f);
+            for (size_t i = 0; i < n; ++i) { a[i] = dist(gen); b[i] = dist(gen); }
+
+            double ms_s = 0, ms_n = 0;
+            for (int r = 0; r < repeats; ++r) {
+                auto t0 = std::chrono::high_resolution_clock::now();
+                DotProductScalar(a, b);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                DotProductNeon(a, b);
+                auto t2 = std::chrono::high_resolution_clock::now();
+                ms_s += std::chrono::duration<double, std::milli>(t1 - t0).count();
+                ms_n += std::chrono::duration<double, std::milli>(t2 - t1).count();
+            }
+            out.push_back({n, ms_s / repeats, ms_n / repeats});
+            chart_progress.store((float)(++idx) / total);
+        }
+        chart_running.store(false);
+        return out;
+    });
+}
+
+static void DrawChart() {
+    if (chart_future.valid() && !chart_running.load() &&
+        chart_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        chart_data = chart_future.get();
+
+    if (chart_running.load()) {
+        ImGui::TextUnformatted("Замер...");
+        ImGui::SameLine();
+        ImGui::ProgressBar(chart_progress.load(), ImVec2(-1, 0));
+    } else {
+        if (ImGui::Button("Построить")) RunChartAsync();
+    }
+    ImGui::Spacing();
+
+    if (chart_data.size() < 2) {
+        ImGui::TextDisabled("Нажмите «Построить» — 80 точек от 1K до 10M.");
+        return;
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 origin  = ImGui::GetCursorScreenPos();
+    float avail    = ImGui::GetContentRegionAvail().x;
+    float chartH   = std::max(260.0f, ImGui::GetContentRegionAvail().y - 8.f);
+    float padL = 58, padR = 16, padT = 24, padB = 36;
+    float W = avail - padL - padR, H = chartH - padT - padB;
+    ImVec2 tl(origin.x + padL, origin.y + padT);
+    ImVec2 br(origin.x + padL + W, origin.y + padT + H);
+
+    // белый фон
+    dl->AddRectFilled(ImVec2(origin.x, origin.y),
+                      ImVec2(origin.x + avail, origin.y + chartH), IM_COL32(245,246,248,255));
+    dl->AddRect(ImVec2(origin.x, origin.y),
+                ImVec2(origin.x + avail, origin.y + chartH), IM_COL32(180,185,195,255));
+
+    double maxMs = 0;
+    for (auto& p : chart_data) maxMs = std::max(maxMs, std::max(p.ms_scalar, p.ms_neon));
+    if (maxMs <= 0) maxMs = 1.0;
+
+    double yStep = 0.5;
+    if (maxMs > 8) yStep = 2.0;
+    else if (maxMs > 4) yStep = 1.0;
+    for (double y = 0; y <= maxMs + 1e-9; y += yStep) {
+        float fy = tl.y + H * (1.f - (float)(y / maxMs));
+        if (fy < tl.y - 1 || fy > br.y + 1) continue;
+        dl->AddLine(ImVec2(tl.x, fy), ImVec2(br.x, fy), IM_COL32(210,212,218,255), 1.f);
+        char lbl[32];
+        if (y < 1e-9) std::snprintf(lbl, sizeof(lbl), "0");
+        else if (yStep < 1.0) std::snprintf(lbl, sizeof(lbl), "%.1f", y);
+        else                  std::snprintf(lbl, sizeof(lbl), "%.0f", y);
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(tl.x - ts.x - 4, fy - 7), IM_COL32(100,104,115,255), lbl);
+    }
+
+    const double logXMin = std::log10(1000.0);
+    const double logXMax = std::log10((double)chart_data.back().n);
+    const double logXRange = logXMax - logXMin;
+    auto fx = [&](double sz) { return tl.x + (float)((std::log10(sz) - logXMin) / logXRange * W); };
+
+    const double ticks[] = {1e3,2e3,5e3,1e4,2e4,5e4,1e5,2e5,5e5,1e6,2e6,5e6,1e7};
+    for (double sz : ticks) {
+        float x = fx(sz);
+        if (x < tl.x - 1 || x > br.x + 1) continue;
+        dl->AddLine(ImVec2(x, tl.y), ImVec2(x, br.y), IM_COL32(210,212,218,255), 1.f);
+        char lbl[16];
+        if (sz >= 1e6) std::snprintf(lbl, sizeof(lbl), "%.0fM", sz/1e6);
+        else           std::snprintf(lbl, sizeof(lbl), "%.0fK", sz/1e3);
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(x - ts.x*0.5f, br.y + 5), IM_COL32(90,95,110,255), lbl);
+    }
+
+    struct { ImU32 col; const char* name; } styles[2] = {
+        { IM_COL32(220, 80, 60, 255),  "Scalar" },
+        { IM_COL32(40, 130, 210, 255), "NEON"   },
+    };
+
+    for (int a = 0; a < 2; ++a) {
+        std::vector<ImVec2> pts;
+        pts.reserve(chart_data.size());
+        for (auto& p : chart_data) {
+            double ms = (a == 0) ? p.ms_scalar : p.ms_neon;
+            float px = fx((double)p.n);
+            float py = tl.y + H * (1.f - (float)(ms / maxMs));
+            py = std::max(tl.y, std::min(br.y, py));
+            pts.push_back(ImVec2(px, py));
+        }
+        dl->AddPolyline(pts.data(), (int)pts.size(), styles[a].col, ImDrawFlags_None, 1.8f);
+    }
+
+    dl->AddLine(ImVec2(tl.x, br.y), ImVec2(br.x, br.y), IM_COL32(120,125,135,255), 1.5f);
+    dl->AddLine(ImVec2(tl.x, tl.y), ImVec2(tl.x, br.y), IM_COL32(120,125,135,255), 1.5f);
+
+    float legX = tl.x + 8, legY = tl.y + 6;
+    for (int a = 0; a < 2; ++a) {
+        dl->AddRectFilled(ImVec2(legX, legY+2), ImVec2(legX+16, legY+10), styles[a].col);
+        dl->AddText(ImVec2(legX+20, legY), IM_COL32(50,54,65,255), styles[a].name);
+        legX += 20 + ImGui::CalcTextSize(styles[a].name).x + 16;
+    }
+
+    ImGui::Dummy(ImVec2(avail, chartH + 4));
+}
 
 static int demo_N = 1024;
 static float step_size_A = 0.5f;
@@ -175,6 +333,9 @@ int Run(const Options& opts) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 20.0f));
         ImGui::Begin("Content", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
+        if (ImGui::BeginTabBar("##tabs")) {
+
+        if (ImGui::BeginTabItem("Демо")) {
         ImGui::Columns(2, "MainColumns", false);
         ImGui::SetColumnWidth(0, display_size.x * 0.55f);
 
@@ -275,6 +436,17 @@ int Run(const Options& opts) {
             }
         }
         
+        ImGui::EndTabItem(); // Демо
+        }
+
+        if (ImGui::BeginTabItem("График")) {
+            DrawChart();
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
+        } // BeginTabBar
+
         ImGui::End();
         ImGui::PopStyleVar();
 
