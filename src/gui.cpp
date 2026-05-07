@@ -29,7 +29,15 @@ static std::future<std::vector<ChartPoint>> chart_future;
 static const int chart_repeats = 3;
 
 static std::vector<size_t> BuildChartSizes() {
-    return {100, 1000, 10000, 100000, 1000000, 10000000};
+    std::vector<size_t> sizes;
+    const double lo = std::log2(100.0), hi = std::log2(10000000.0);
+    for (int i = 0; i < 100; ++i) {
+        double t = (double)i / 99.0;
+        size_t s = (size_t)std::round(std::pow(2.0, lo + t * (hi - lo)));
+        s = (s + 15) & ~size_t(15);
+        sizes.push_back(s);
+    }
+    return sizes;
 }
 
 static void RunChartAsync() {
@@ -88,7 +96,7 @@ static void DrawChart() {
     ImGui::Spacing();
 
     if (chart_data.size() < 2) {
-        ImGui::TextDisabled("Нажмите «Построить» — 6 точек от 100 до 10M.");
+        ImGui::TextDisabled("Нажмите «Построить» — 100 точек от 100 до 10M.");
         return;
     }
 
