@@ -30,7 +30,7 @@ static const int chart_repeats = 3;
 
 static std::vector<size_t> BuildChartSizes() {
     std::vector<size_t> sizes;
-    const double lo = std::log2(1000.0), hi = std::log2(10000000.0);
+    const double lo = std::log2(100.0), hi = std::log2(10000000.0);
     for (int i = 0; i < 80; ++i) {
         double t = (double)i / 79.0;
         size_t s = (size_t)std::round(std::pow(2.0, lo + t * (hi - lo)));
@@ -96,7 +96,7 @@ static void DrawChart() {
     ImGui::Spacing();
 
     if (chart_data.size() < 2) {
-        ImGui::TextDisabled("Нажмите «Построить» — 80 точек от 1K до 10M.");
+        ImGui::TextDisabled("Нажмите «Построить» — 80 точек от 100 до 10M.");
         return;
     }
 
@@ -146,20 +146,21 @@ static void DrawChart() {
         dl->AddText(ImVec2(tl.x - ts.x - 6, fy - 7), IM_COL32(100, 120, 170, 220), lbl);
     }
 
-    const double logXMin   = std::log10(1000.0);
+    const double logXMin   = std::log10(100.0);
     const double logXMax   = std::log10((double)chart_data.back().n);
     const double logXRange = logXMax - logXMin;
     auto fx = [&](double sz) { return tl.x + (float)((std::log10(sz) - logXMin) / logXRange * W); };
 
     // --- вертикальные сетки ---
-    const double ticks[] = {1e3,2e3,5e3,1e4,2e4,5e4,1e5,2e5,5e5,1e6,2e6,5e6,1e7};
+    const double ticks[] = {1e2, 1e3, 1e4, 1e5, 1e6, 1e7};
     for (double sz : ticks) {
         float x = fx(sz);
         if (x < tl.x - 1 || x > br.x + 1) continue;
         dl->AddLine(ImVec2(x, tl.y), ImVec2(x, br.y), IM_COL32(25, 35, 65, 180), 1.0f);
         char lbl[16];
         if (sz >= 1e6) std::snprintf(lbl, sizeof(lbl), "%.0fM", sz/1e6);
-        else           std::snprintf(lbl, sizeof(lbl), "%.0fK", sz/1e3);
+        else if (sz >= 1e3) std::snprintf(lbl, sizeof(lbl), "%.0fK", sz/1e3);
+        else           std::snprintf(lbl, sizeof(lbl), "%.0f", sz);
         ImVec2 ts = ImGui::CalcTextSize(lbl);
         dl->AddText(ImVec2(x - ts.x*0.5f, br.y + 7), IM_COL32(90, 110, 160, 200), lbl);
     }
